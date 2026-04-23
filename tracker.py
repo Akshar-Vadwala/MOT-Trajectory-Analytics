@@ -1,21 +1,33 @@
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from filterpy.kalman import KalmanFilter
-from scipy.spatial.distance import cosine  # NEW: For appearance metric
+from scipy.spatial.distance import cosine 
+from enum import Enum
+
+class TrackState(Enum):
+    ACTIVE = 1
+    LOST = 2
+    REMOVED = 3
 
 def calculate_iou(boxA, boxB):
-    
+    """
+    Calculates the Intersection over Union (IoU) between two bounding boxes.
+    Boxes are expected in [x1, y1, x2, y2] format.
+    """
     xA = max(boxA[0], boxB[0])
     yA = max(boxA[1], boxB[1])
     xB = min(boxA[2], boxB[2])
     yB = min(boxA[3], boxB[3])
+
     interArea = max(0, xB - xA) * max(0, yB - yA)
     boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
     boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-    return interArea / float(boxAArea + boxBArea - interArea)
+
+    iou = interArea / float(boxAArea + boxBArea - interArea)
+    return iou
 
 def convert_bbox_to_z(bbox):
-    
+    """Converts [x1,y1,x2,y2] to center format [cx, cy, scale, aspect_ratio] for the Kalman Filter."""
     w = bbox[2] - bbox[0]
     h = bbox[3] - bbox[1]
     cx = bbox[0] + w / 2.
@@ -25,19 +37,16 @@ def convert_bbox_to_z(bbox):
     return np.array([cx, cy, s, r]).reshape((4, 1))
 
 def convert_x_to_bbox(x, score=None):
-    
+    """Converts center format [cx, cy, scale, aspect_ratio] back to [x1,y1,x2,y2]."""
     w = np.sqrt(x[2] * x[3])
     h = x[2] / w
     cx, cy = x[0], x[1]
     return np.array([cx - w / 2., cy - h / 2., cx + w / 2., cy + h / 2.]).reshape((1, 4))
 
-
 def associate_detections_to_tracks(detections, tracks, det_features, trk_features, iou_threshold=0.15, lambda_weight=0.5):
     """
     Assigns detections using both Spatial (IoU) and Appearance (Cosine) costs.
-    lambda_weight balances IoU and Appearance. 0 = Only Appearance, 1 = Only Spatial.
-    Kalman filter for predicting movement
-    Hungarian algorithm for matching 
+    Applies spatial gating to optimize the assignment algorithm.
     """
     if len(tracks) == 0:
         return np.empty((0, 2), dtype=int), np.arange(len(detections)), np.empty((0, 5), dtype=int)
@@ -53,21 +62,22 @@ def associate_detections_to_tracks(detections, tracks, det_features, trk_feature
     appearance_cost = np.zeros((len(detections), len(tracks)), dtype=np.float32)
     for d, d_feat in enumerate(det_features):
         for t, t_feat in enumerate(trk_features):
-            # cosine() returns distance (0 = identical, 2 = opposites). 
-            # We normalize it roughly between 0 and 1.
             if np.sum(d_feat) == 0 or np.sum(t_feat) == 0:
-                appearance_cost[d, t] = 1.0  # High cost if extraction failed
+                appearance_cost[d, t] = 1.0  
             else:
                 appearance_cost[d, t] = cosine(d_feat, t_feat) / 2.0 
 
     # Combine Costs
     cost_matrix = lambda_weight * spatial_cost + (1 - lambda_weight) * appearance_cost
     
+    # Apply Spatial Gating
+    cost_matrix[iou_matrix == 0] = 1e5 
+
     # Solve using Hungarian Algorithm
     matched_indices = linear_sum_assignment(cost_matrix)
     matched_indices = np.asarray(matched_indices).T
 
-    # Filter out matches that don't meet our threshold
+    # Filter matches based on strict constraints
     unmatched_detections = []
     for d, det in enumerate(detections):
         if d not in matched_indices[:, 0]:
@@ -94,7 +104,8 @@ def associate_detections_to_tracks(detections, tracks, det_features, trk_feature
     return matches, np.array(unmatched_detections), np.array(unmatched_tracks)
 
 class Track:
-    def __init__(self, bbox, track_id, feature): # NEW: Accepts initial feature
+    """Represents a single tracked object with state management and appearance memory."""
+    def __init__(self, bbox, track_id, feature): 
         self.id = track_id
         self.kf = KalmanFilter(dim_x=7, dim_z=4)
         
@@ -111,8 +122,8 @@ class Track:
         self.kf.x[:4] = convert_bbox_to_z(bbox)
         self.time_since_update = 0
         self.hits = 1
-        
         self.feature = feature 
+        self.state = TrackState.ACTIVE
 
     def predict(self):
         if((self.kf.x[6]+self.kf.x[2]) <= 0):
@@ -124,6 +135,7 @@ class Track:
     def update(self, bbox, feature): 
         self.time_since_update = 0
         self.hits += 1
+        self.state = TrackState.ACTIVE 
         self.kf.update(convert_bbox_to_z(bbox))
         
         alpha = 0.9 
@@ -131,7 +143,8 @@ class Track:
         self.feature /= np.linalg.norm(self.feature) 
 
 class Tracker:
-    def __init__(self, max_age=15, min_hits=3, iou_threshold=0.15, lambda_weight=0.5):
+    """Manages the full lifecycle of all tracked objects."""
+    def __init__(self, max_age=90, min_hits=3, iou_threshold=0.15, lambda_weight=0.5):
         self.max_age = max_age
         self.min_hits = min_hits
         self.iou_threshold = iou_threshold
@@ -140,7 +153,7 @@ class Tracker:
         self.frame_count = 0
         self.track_id_counter = 1
 
-    def update(self, detections, features):
+    def update(self, detections, features): 
         self.frame_count += 1
         
         predicted_boxes = np.zeros((len(self.tracks), 4))
@@ -164,11 +177,19 @@ class Tracker:
 
         ret = []
         for trk in self.tracks:
-            if trk.time_since_update < 1 and (trk.hits >= self.min_hits or self.frame_count <= self.min_hits):
+            
+            if trk.time_since_update > 0:
+                trk.state = TrackState.LOST
+                
+            if trk.time_since_update > self.max_age:
+                trk.state = TrackState.REMOVED
+
+           
+            if trk.state == TrackState.ACTIVE and (trk.hits >= self.min_hits or self.frame_count <= self.min_hits):
                 bbox = convert_x_to_bbox(trk.kf.x)[0]
                 ret.append(np.concatenate((bbox, [trk.id])).reshape(1,-1))
             
-        self.tracks = [t for t in self.tracks if t.time_since_update <= self.max_age]
+        self.tracks = [t for t in self.tracks if t.state != TrackState.REMOVED]
 
         if len(ret) > 0:
             return np.concatenate(ret)

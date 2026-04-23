@@ -1,11 +1,13 @@
 import cv2
+import time
 import numpy as np
 from ultralytics import YOLO
 from tracker import Tracker
 from embedder import FeatureExtractor 
 
-def run_detection(video_path, output_path=None):
-    model = YOLO('yolov8m.pt') 
+
+def run_detection(video_path, output_path=None, output_txt_path="Evaluations/tracker_output_13.txt"):
+    model = YOLO('yolov8m.pt')
     
     mot_tracker = Tracker(max_age=90, min_hits=3, iou_threshold=0.15, lambda_weight=0.5)
     embedder = FeatureExtractor() 
@@ -18,17 +20,28 @@ def run_detection(video_path, output_path=None):
     writer = None
     if output_path:
         fps = int(cap.get(cv2.CAP_PROP_FPS))
+
+        if fps == 0 or fps < 1:
+            fps = 30
+
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
+    eval_log = open(output_txt_path, "w")
+    frame_num = 0
+
     print("Starting DeepSORT tracking... Press 'q' to quit.")
+
+    start_time = time.time()
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
+            
+        frame_num += 1 
 
         results = model(frame, stream=True, verbose=False)
         
@@ -62,6 +75,11 @@ def run_detection(video_path, output_path=None):
             x1, y1, x2, y2 = track[:4].astype(int)
             track_id = int(track[4])
             
+            # MOT16 Format: [Frame], [ID], [Box Left (X)], [Box Top (Y)], [Box Width], [Box Height], [Confidence], [3D X], [3D Y], [3D Z]
+            w = x2 - x1
+            h = y2 - y1
+            eval_log.write(f"{frame_num},{track_id},{x1},{y1},{w},{h},1,-1,-1,-1\n")
+            
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
             label = f"ID: {track_id}"
             cv2.putText(frame, label, (x1, y1 - 10), 
@@ -78,11 +96,17 @@ def run_detection(video_path, output_path=None):
     cap.release()
     if writer:
         writer.release()
+    eval_log.close() 
     cv2.destroyAllWindows()
+
+    total_time = time.time() - start_time
+    avg_fps = frame_num / total_time
+    print(f"Tracking complete. Evaluation log saved to {output_txt_path}")
+    print(f"Pipeline Performance: {avg_fps:.2f} Frames Per Second (FPS)")
 
 if __name__ == "__main__":
 
-    INPUT_VIDEO = "MOT/MOT_sample_2.mp4"  
-    OUTPUT_VIDEO = "MOT_outputs/MOT_sample_2_output.mp4" 
+    INPUT_VIDEO = "MOT16/train/MOT16-13/img1/%06d.jpg"  
+    OUTPUT_VIDEO = "MOT16_outputs/MOT16-13_output.mp4" 
 
     run_detection(INPUT_VIDEO, OUTPUT_VIDEO)

@@ -1,3 +1,6 @@
-MOT/
-MOT_outputs/
-yolo_outputs/
+Evaluations/
+MOT16/
+MOT16_outputs/
+Sample/
+Sample_outputs/
+YOLO_outputs/
