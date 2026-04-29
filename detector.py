@@ -3,6 +3,7 @@ import time
 import numpy as np
 from ultralytics import YOLO
 from tracker import Tracker
+import matplotlib.pyplot as plt
 from embedder import FeatureExtractor 
 
 
@@ -32,11 +33,16 @@ def run_detection(video_path, output_path=None, output_txt_path="Evaluations/tra
     eval_log = open(output_txt_path, "w")
     frame_num = 0
 
+    fps_history = []
+    crowd_density_history = []
+
     print("Starting DeepSORT tracking... Press 'q' to quit.")
 
     start_time = time.time()
 
     while True:
+        loop_start = time.time()
+        
         ret, frame = cap.read()
         if not ret:
             break
@@ -71,6 +77,15 @@ def run_detection(video_path, output_path=None, output_txt_path="Evaluations/tra
             
         track_results = mot_tracker.update(detections, features)
 
+        active_people = len(track_results)
+        total_unique_people = mot_tracker.track_id_counter - 1
+
+        cv2.rectangle(frame, (10, 10), (380, 100), (0, 0, 0), -1)
+        cv2.putText(frame, f"Active on Screen: {active_people}", (20, 40), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(frame, f"Total People Counted: {total_unique_people}", (20, 80), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
         for track in track_results:
             x1, y1, x2, y2 = track[:4].astype(int)
             track_id = int(track[4])
@@ -90,6 +105,11 @@ def run_detection(video_path, output_path=None, output_txt_path="Evaluations/tra
 
         cv2.imshow("Multi-Object Tracking", frame)
 
+        loop_time = time.time() - loop_start
+        current_fps = 1.0 / loop_time if loop_time > 0 else 0
+        fps_history.append(current_fps)
+        crowd_density_history.append(active_people)
+
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
@@ -104,9 +124,34 @@ def run_detection(video_path, output_path=None, output_txt_path="Evaluations/tra
     print(f"Tracking complete. Evaluation log saved to {output_txt_path}")
     print(f"Pipeline Performance: {avg_fps:.2f} Frames Per Second (FPS)")
 
+    print("Generating Analytics Dashboard...")
+    plt.figure(figsize=(14, 6))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(crowd_density_history, color='blue', linewidth=2)
+    plt.title('Crowd Density Over Time')
+    plt.xlabel('Frame Number')
+    plt.ylabel('Active People on Screen')
+    plt.grid(True, linestyle='--', alpha=0.7)
+
+    plt.subplot(1, 2, 2)
+    plt.plot(fps_history, color='orange', linewidth=2)
+    plt.title('Real-Time Processing Speed (FPS)')
+    plt.xlabel('Frame Number')
+    plt.ylabel('Frames Per Second')
+    plt.axhline(y=avg_fps, color='red', linestyle='--', label=f'Avg FPS: {avg_fps:.2f}')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.7)
+
+    dashboard_path = "Sample_outputs/analytics_dashboard_sample_2.png"
+    plt.tight_layout()
+    plt.savefig(dashboard_path)
+    print(f"Dashboard saved successfully to {dashboard_path}")
+
 if __name__ == "__main__":
 
-    INPUT_VIDEO = "MOT16/train/MOT16-13/img1/%06d.jpg"  
-    OUTPUT_VIDEO = "MOT16_outputs/MOT16-13_output.mp4" 
+    # INPUT_VIDEO = "MOT16/train/MOT16-13/img1/%06d.jpg"  
+    INPUT_VIDEO = "Sample/MOT_sample_2.mp4"  
+    OUTPUT_VIDEO = "Sample_outputs/MOT_sample_2_output_states.mp4" 
 
     run_detection(INPUT_VIDEO, OUTPUT_VIDEO)

@@ -47,6 +47,9 @@ def associate_detections_to_tracks(detections, tracks, det_features, trk_feature
     """
     Assigns detections using both Spatial (IoU) and Appearance (Cosine) costs.
     Applies spatial gating to optimize the assignment algorithm.
+
+    Kalman filter for predicting movement
+    Hungarian algorithm for matching 
     """
     if len(tracks) == 0:
         return np.empty((0, 2), dtype=int), np.arange(len(detections)), np.empty((0, 5), dtype=int)
